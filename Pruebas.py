@@ -84,10 +84,11 @@ def get_model(checkpoint, num_labels, label_map, label2id_, from_tf=False):
     )
 
     try:
-        device = torch.device('cuda:0')
+        dev = "cuda:1"
+        device = torch.device(dev)
         model = model.to(device)
     except:
-        pass
+        print(f"No ha sido posible pasar el modelo a {dev}")
 
     tokenizer = RobertaTokenizerFast.from_pretrained(
         checkpoint,
@@ -222,6 +223,7 @@ if __name__ == "__main__":
     _path_code = _path + "Code/"
     _path_data = _path + "NER"
     _path_models = _path + "Models/"
+    _path_knowledge = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/Data/knowledge_prueba"
 
     num_threads = 16
 

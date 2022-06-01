@@ -363,6 +363,25 @@ class RobertaIntermediate(nn.Module):
         return hidden_states
 
 
+# CG. Intermediate Knowledge layer. Input size and output size = hidden_size (768)
+class RobertaIntermediateKnowledge(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+
+        use_act_fn = False
+        if use_act_fn:
+            if isinstance(config.hidden_act, str):
+                self.intermediate_act_fn = ACT2FN[config.hidden_act]
+            else:
+                self.intermediate_act_fn = config.hidden_act
+
+    # def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    #     hidden_states = self.dense(hidden_states)
+    #     hidden_states = self.intermediate_act_fn(hidden_states)
+    #     return hidden_states
+
+
 # Copied from transformers.models.bert.modeling_bert.BertOutput
 class RobertaOutput(nn.Module):
     def __init__(self, config):
@@ -376,6 +395,25 @@ class RobertaOutput(nn.Module):
         hidden_states = self.dropout(hidden_states)
         hidden_states = self.LayerNorm(hidden_states + input_tensor)
         return hidden_states
+
+
+# CG. Output Knowledge layer. Input size and output size = hidden_size (768)
+class RobertaOutputKnowledge(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+
+        use_act_fn = False
+        if use_act_fn:
+            if isinstance(config.hidden_act, str):
+                self.intermediate_act_fn = ACT2FN[config.hidden_act]
+            else:
+                self.intermediate_act_fn = config.hidden_act
+
+    # def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    #     hidden_states = self.dense(hidden_states)
+    #     hidden_states = self.intermediate_act_fn(hidden_states)
+    #     return hidden_states
 
 
 # Copied from transformers.models.bert.modeling_bert.BertLayer with Bert->Roberta
@@ -397,8 +435,8 @@ class RobertaLayer(nn.Module):
 
         # CG.
         if add_known:
-            self.intermediate_know = RobertaIntermediate(config)
-            self.output_know = RobertaOutput(config)
+            self.intermediate_know = RobertaIntermediateKnowledge(config)
+            self.output_know = RobertaOutputKnowledge(config)
 
     def forward(
         self,

@@ -2099,6 +2099,13 @@ class PreTrainedModel(nn.Module, ModuleUtilsMixin, GenerationMixin, PushToHubMix
             if low_cpu_mem_usage:
                 state_dict = None
 
+            # CG. Add kembeding to state_dict
+            for key in list(state_dict.keys()):
+                if "word_embeddings" in key and "kword_embeddings" not in key:
+                    new_key = key.replace("word_embeddings", "kword_embeddings")
+                    if new_key not in list(state_dict.keys()):
+                        state_dict[new_key] = state_dict[key]
+
         config.name_or_path = pretrained_model_name_or_path
 
         # Instantiate model.
