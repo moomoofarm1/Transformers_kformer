@@ -9,7 +9,6 @@ from seqeval.metrics import f1_score, precision_score, recall_score
 from datasets import Dataset, DatasetDict
 from transformers import (
     DataCollatorForTokenClassification,
-    AutoModelForTokenClassification,
     TrainingArguments,
     Trainer,
     EvalPrediction,
@@ -99,7 +98,7 @@ def get_model(checkpoint, num_labels, label_map, label2id_, from_tf=False):
 
 
 def get_dataset(path, dir_paths, data_type, label2id_):
-    columns = ["tokens", "labels"]
+    columns = ["tokens", "labels", "knowledge"]
     datasets_dict = dict()
     dfs = dict()
 
@@ -109,8 +108,9 @@ def get_dataset(path, dir_paths, data_type, label2id_):
 
         for csv_file in csv_files:
             df_readed = pd.read_csv(path + directory + csv_file)
-            df_readed[columns[0]] = df_readed[columns[0]].apply(ast.literal_eval)
-            df_readed[columns[1]] = df_readed[columns[1]].apply(ast.literal_eval)
+            for i in range(len(columns)):
+                df_readed[columns[i]] = df_readed[columns[i]].apply(ast.literal_eval)
+                # df_readed[columns[1]] = df_readed[columns[1]].apply(ast.literal_eval)
             df_col = pd.concat([df_col, df_readed])
 
         df_col = df_col.reset_index(drop=True)
@@ -148,6 +148,19 @@ def tokenize_and_align_labels(examples):
                                   truncation=True,
                                   is_split_into_words=True)
 
+    tokenized_knowledge = []
+    for row in examples["knowledge"]:
+        tokenized_row = {'input_ids': [], 'attention_mask': []}
+        for know in row:
+            tokenized_know = (_tokenizer(know,
+                                         truncation=True))
+            tokenized_row['input_ids'].append(tokenized_know['input_ids'])
+            tokenized_row['attention_mask'].append(tokenized_know['attention_mask'])
+        tokenized_knowledge.append(tokenized_row)
+
+    # tokenized_knowledge = _tokenizer(examples["knowledge"],
+    #                                  truncation=True,)
+
     labels = []
     for i, label in enumerate(examples[f"labels"]):
         word_ids = tokenized_inputs.word_ids(batch_index=i)  # Map tokens to their respective word.
@@ -170,6 +183,10 @@ def tokenize_and_align_labels(examples):
         labels.append(label_ids)
 
     tokenized_inputs["labels"] = labels
+    l = []
+    for e in tokenized_knowledge:
+        l.append(e['input_ids'])
+    tokenized_inputs["knowledge"] = l
     return tokenized_inputs
 
 

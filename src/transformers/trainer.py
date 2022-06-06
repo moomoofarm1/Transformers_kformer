@@ -611,7 +611,9 @@ class Trainer:
             signature = inspect.signature(self.model.forward)
             self._signature_columns = list(signature.parameters.keys())
             # Labels may be named label or label_ids, the default data collator handles that.
-            self._signature_columns += list(set(["label", "label_ids"] + self.label_names))
+
+            # CG. Add "knowledge" to default columns
+            self._signature_columns += list(set(["label", "label_ids", "knowledge"] + self.label_names))
 
     def _remove_unused_columns(self, dataset: "datasets.Dataset", description: Optional[str] = None):
         if not self.args.remove_unused_columns:

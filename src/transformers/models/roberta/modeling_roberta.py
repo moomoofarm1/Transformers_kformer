@@ -16,6 +16,7 @@
 """PyTorch RoBERTa model."""
 
 import math
+from copy import deepcopy
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -23,6 +24,7 @@ import torch.utils.checkpoint
 from packaging import version
 from torch import nn
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+import torch.nn.functional as F
 
 from ...activations import ACT2FN, gelu
 from ...modeling_outputs import (
@@ -438,6 +440,7 @@ class RobertaLayer(nn.Module):
             self.intermediate_know = RobertaIntermediateKnowledge(config)
             self.output_know = RobertaOutputKnowledge(config)
 
+    # CG. Added knowledge to params
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -447,6 +450,7 @@ class RobertaLayer(nn.Module):
         encoder_attention_mask: Optional[torch.FloatTensor] = None,
         past_key_value: Optional[Tuple[Tuple[torch.FloatTensor]]] = None,
         output_attentions: Optional[bool] = False,
+        knowledge: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor]:
         # decoder uni-directional self-attention cached key/values tuple is at positions 1,2
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
@@ -523,6 +527,7 @@ class RobertaEncoder(nn.Module):
 
         self.gradient_checkpointing = False
 
+    # CG. Added knowledge to params
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -535,6 +540,7 @@ class RobertaEncoder(nn.Module):
         output_attentions: Optional[bool] = False,
         output_hidden_states: Optional[bool] = False,
         return_dict: Optional[bool] = True,
+        knowledge: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPastAndCrossAttentions]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -579,6 +585,7 @@ class RobertaEncoder(nn.Module):
                     encoder_attention_mask,
                     past_key_value,
                     output_attentions,
+                    knowledge,
                 )
 
             hidden_states = layer_outputs[0]
@@ -764,6 +771,13 @@ class RobertaModel(RobertaPreTrainedModel):
         self.config = config
 
         self.embeddings = RobertaEmbeddings(config)
+
+        # CG. Add knowledge embedding
+        if int(self.config.knowledge[0]) >= 0:
+            self.kembedding = deepcopy(self.embeddings)
+        else:
+            self.kembedding = None
+
         self.encoder = RobertaEncoder(config)
 
         self.pooler = RobertaPooler(config) if add_pooling_layer else None
@@ -773,6 +787,9 @@ class RobertaModel(RobertaPreTrainedModel):
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
+
+    def get_know_embeddings(self):
+        return self.kembedding.word_embeddings
 
     def set_input_embeddings(self, value):
         self.embeddings.word_embeddings = value
@@ -793,6 +810,7 @@ class RobertaModel(RobertaPreTrainedModel):
         config_class=_CONFIG_FOR_DOC,
     )
     # Copied from transformers.models.bert.modeling_bert.BertModel.forward
+    # CG. Added knowledge in params
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -808,6 +826,7 @@ class RobertaModel(RobertaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        knowledge: Optional[torch.Tensor] = None,
     ) -> Union[Tuple[torch.Tensor], BaseModelOutputWithPoolingAndCrossAttentions]:
         r"""
         encoder_hidden_states  (`torch.FloatTensor` of shape `(batch_size, sequence_length, hidden_size)`, *optional*):
@@ -829,6 +848,7 @@ class RobertaModel(RobertaPreTrainedModel):
             If set to `True`, `past_key_values` key value states are returned and can be used to speed up decoding (see
             `past_key_values`).
         """
+
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
@@ -856,7 +876,7 @@ class RobertaModel(RobertaPreTrainedModel):
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
 
         if attention_mask is None:
-            attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
+            attention_mask = torch.ones((batch_size, seq_length + past_key_values_length), device=device)
 
         if token_type_ids is None:
             if hasattr(self.embeddings, "token_type_ids"):
@@ -895,6 +915,25 @@ class RobertaModel(RobertaPreTrainedModel):
             inputs_embeds=inputs_embeds,
             past_key_values_length=past_key_values_length,
         )
+
+        # CG. Knowledge enbedding
+        # PROBLEMA: El knowledge entra de diferente forma en kformer pero no se que hacen antes
+        # EN KFORMER: ese cambio lo hacen en social_iqa_task,py o algo así
+        if knowledge is not None:
+            origin_knowledge_mask = knowledge.eq(self.kembedding.word_embeddings.padding_idx)
+            knowledge = self.kembedding(knowledge)
+            knowledge_mask = origin_knowledge_mask.eq(0).unsqueeze(-1).type_as(knowledge)
+            knowledge *= knowledge_mask
+            knowledge = torch.sum(knowledge, dim=2) / torch.sum(knowledge_mask, dim=2)
+            avg_embedding = embedding_output.mean(axis=1).unsqueeze(-1).detach()
+            relation = torch.matmul(knowledge, avg_embedding).squeeze(-1)
+            relation = F.softmax(relation, dim=1)
+            maxk = max((1, 5))
+            _, top_index = relation.topk(maxk, 1, True, True)
+            dummy = top_index.unsqueeze(-1).expand(top_index.size(0), top_index.size(1), knowledge.size(2))
+            knowledge = torch.gather(knowledge, 1, dummy)
+
+        # CG. Add kembedding_output for knowledge.
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask,
@@ -906,6 +945,7 @@ class RobertaModel(RobertaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            knowledge=knowledge
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
@@ -1429,6 +1469,8 @@ class RobertaForTokenClassification(RobertaPreTrainedModel):
         expected_output="['O', 'ORG', 'ORG', 'O', 'O', 'O', 'O', 'O', 'LOC', 'O', 'LOC', 'LOC']",
         expected_loss=0.01,
     )
+
+    # CG. Added knowledge to params
     def forward(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1441,6 +1483,7 @@ class RobertaForTokenClassification(RobertaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        knowledge: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple[torch.Tensor], TokenClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -1458,6 +1501,7 @@ class RobertaForTokenClassification(RobertaPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
+            knowledge=knowledge,
         )
 
         sequence_output = outputs[0]
