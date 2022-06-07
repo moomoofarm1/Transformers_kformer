@@ -235,16 +235,15 @@ def get_trainer(path, model, tokenizer, tokenized_datasets, data_collator):
 
 
 if __name__ == "__main__":
-    _path = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER"
-    _path_ner = _path + "/"
+    _path = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER/"
     _path_code = _path + "Code/"
-    _path_data = _path + "NER"
+    _path_data = _path + "data/"
     _path_models = _path + "Models/"
     _path_knowledge = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/Data/knowledge_prueba"
 
     num_threads = 16
 
-    _labels = get_all_labels(_path_ner + "train-set/subtask1-NER/")
+    _labels = get_all_labels(_path_data + "train-set/subtask1-NER/")
     _label_map = {i: label for i, label in enumerate(_labels)}
     _label2id_ = {label: i for i, label in enumerate(_labels)}
     _num_labels = len(_labels)
@@ -258,7 +257,7 @@ if __name__ == "__main__":
 
     print("Cargando datos...")
 
-    _raw_datasets = get_dataset(_path_ner, _dir_paths, _data_type_, _label2id_)
+    _raw_datasets = get_dataset(_path_data, _dir_paths, _data_type_, _label2id_)
 
     print("DONE\n")
 
