@@ -119,12 +119,21 @@ class RobertaEmbeddings(nn.Module):
         # when its auto-generated, registered buffer helps users when tracing the model without passing token_type_ids, solves
         # issue #5664
         if token_type_ids is None:
-            if hasattr(self, "token_type_ids"):
+            # CG. token_type_ids are all zeros
+            if not (False in (self.token_type_ids == 0)):
                 buffered_token_type_ids = self.token_type_ids[:, :seq_length]
                 buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
+                for i in range(2, len(input_shape)):
+                    buffered_token_type_ids_expanded = buffered_token_type_ids_expanded.unsqueeze(i)
+                    buffered_token_type_ids_expanded = buffered_token_type_ids_expanded.expand(input_shape[:i + 1])
                 token_type_ids = buffered_token_type_ids_expanded
             else:
-                token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
+                if hasattr(self, "token_type_ids"):
+                    buffered_token_type_ids = self.token_type_ids[:, :seq_length]
+                    buffered_token_type_ids_expanded = buffered_token_type_ids.expand(input_shape[0], seq_length)
+                    token_type_ids = buffered_token_type_ids_expanded
+                else:
+                    token_type_ids = torch.zeros(input_shape, dtype=torch.long, device=self.position_ids.device)
 
         if inputs_embeds is None:
             inputs_embeds = self.word_embeddings(input_ids)
@@ -354,6 +363,7 @@ class RobertaIntermediate(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+
         if isinstance(config.hidden_act, str):
             self.intermediate_act_fn = ACT2FN[config.hidden_act]
         else:
@@ -365,23 +375,21 @@ class RobertaIntermediate(nn.Module):
         return hidden_states
 
 
-# CG. Intermediate Knowledge layer. Input size and output size = hidden_size (768)
-class RobertaIntermediateKnowledge(nn.Module):
+# CG. Key Knowledge layer. Input size and output size = hidden_size (768)
+class RobertaKnowledgeKey(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
 
-        use_act_fn = False
-        if use_act_fn:
-            if isinstance(config.hidden_act, str):
-                self.intermediate_act_fn = ACT2FN[config.hidden_act]
-            else:
-                self.intermediate_act_fn = config.hidden_act
+        if isinstance(config.hidden_act, str):
+            self.know_key_act_fn = ACT2FN[config.hidden_act]
+        else:
+            self.know_key_act_fn = config.hidden_act
 
-    # def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    #     hidden_states = self.dense(hidden_states)
-    #     hidden_states = self.intermediate_act_fn(hidden_states)
-    #     return hidden_states
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        return hidden_states
 
 
 # Copied from transformers.models.bert.modeling_bert.BertOutput
@@ -399,23 +407,15 @@ class RobertaOutput(nn.Module):
         return hidden_states
 
 
-# CG. Output Knowledge layer. Input size and output size = hidden_size (768)
-class RobertaOutputKnowledge(nn.Module):
+# CG. Value Knowledge layer. Input size and output size = hidden_size (768)
+class RobertaKnowledgeValue(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
-        use_act_fn = False
-        if use_act_fn:
-            if isinstance(config.hidden_act, str):
-                self.intermediate_act_fn = ACT2FN[config.hidden_act]
-            else:
-                self.intermediate_act_fn = config.hidden_act
-
-    # def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-    #     hidden_states = self.dense(hidden_states)
-    #     hidden_states = self.intermediate_act_fn(hidden_states)
-    #     return hidden_states
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = self.dense(hidden_states)
+        return hidden_states
 
 
 # Copied from transformers.models.bert.modeling_bert.BertLayer with Bert->Roberta
@@ -437,8 +437,11 @@ class RobertaLayer(nn.Module):
 
         # CG.
         if add_known:
-            self.intermediate_know = RobertaIntermediateKnowledge(config)
-            self.output_know = RobertaOutputKnowledge(config)
+            self.knowledge_key = RobertaKnowledgeKey(config)
+            self.knowledge_value = RobertaKnowledgeValue(config)
+        else:
+            self.knowledge_key = None
+            self.knowledge_value = None
 
     # CG. Added knowledge to params
     def forward(
@@ -496,9 +499,17 @@ class RobertaLayer(nn.Module):
             cross_attn_present_key_value = cross_attention_outputs[-1]
             present_key_value = present_key_value + cross_attn_present_key_value
 
+        # layer_output = apply_chunking_to_forward(
+        #     self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+        # )
+
+        if knowledge is not None:
+            fnn_input = {'attention_output': attention_output, 'knowledge': knowledge}
+
         layer_output = apply_chunking_to_forward(
-            self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
+            self.feed_forward_chunk_know, self.chunk_size_feed_forward, self.seq_len_dim, attention_output, knowledge
         )
+
         outputs = (layer_output,) + outputs
 
         # if decoder, return the attn key/values as the last output
@@ -510,6 +521,31 @@ class RobertaLayer(nn.Module):
     def feed_forward_chunk(self, attention_output):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
+        return layer_output
+
+    # CG. New forward to add knowledge
+    def feed_forward_chunk_know(self, attention_output, knowledge=None):
+        k, v, know = None, None, None
+        if knowledge is not None and self.knowledge_key is not None and self.knowledge_value is not None:
+            k = self.knowledge_key(knowledge)
+            v = self.knowledge_value(knowledge)
+
+            know = torch.matmul(attention_output, k.transpose(1, 2))
+            know = self.knowledge_key.know_key_act_fn(know)
+            know = self.knowledge_key.dropout(know)
+
+        intermediate_output = self.intermediate(attention_output)
+        output_dense = self.output.dense(intermediate_output)
+
+        if v is not None:
+            know = torch.matmul(know, v)
+            output_dense += know
+
+        output_dropout = self.output.dropout(output_dense)
+        layer_output = self.output.LayerNorm(output_dropout + attention_output)
+
+        # layer_output = self.output(intermediate_output, attention_output)
+
         return layer_output
 
 
@@ -917,8 +953,7 @@ class RobertaModel(RobertaPreTrainedModel):
         )
 
         # CG. Knowledge enbedding
-        # PROBLEMA: El knowledge entra de diferente forma en kformer pero no se que hacen antes
-        # EN KFORMER: ese cambio lo hacen en social_iqa_task,py o algo así
+        # We only need the best five knowledge sentences.
         if knowledge is not None:
             origin_knowledge_mask = knowledge.eq(self.kembedding.word_embeddings.padding_idx)
             knowledge = self.kembedding(knowledge)
