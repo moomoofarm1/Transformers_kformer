@@ -2,6 +2,9 @@ import types
 import warnings
 from typing import List, Optional, Tuple, Union
 
+# CG. Import torch for knowledge
+import torch
+
 import numpy as np
 
 from ..models.bert.tokenization_bert import BasicTokenizer
@@ -109,6 +112,7 @@ class TokenClassificationPipeline(Pipeline):
         self._basic_tokenizer = BasicTokenizer(do_lower_case=False)
         self._args_parser = args_parser
 
+    # CG. Add knowledge
     def _sanitize_parameters(
         self,
         ignore_labels=None,
@@ -116,6 +120,7 @@ class TokenClassificationPipeline(Pipeline):
         ignore_subwords: Optional[bool] = None,
         aggregation_strategy: Optional[AggregationStrategy] = None,
         offset_mapping: Optional[List[Tuple[int, int]]] = None,
+        knowledge=None,
     ):
 
         preprocess_params = {}
@@ -159,7 +164,8 @@ class TokenClassificationPipeline(Pipeline):
             postprocess_params["ignore_labels"] = ignore_labels
         return preprocess_params, {}, postprocess_params
 
-    def __call__(self, inputs: Union[str, List[str]], **kwargs):
+    # CG. Add knowledge as parameter
+    def __call__(self, inputs: Union[str, List[str]], knowledge: Optional[torch.LongTensor] = None, **kwargs):
         """
         Classify each token of the text(s) given as inputs.
 
@@ -188,9 +194,10 @@ class TokenClassificationPipeline(Pipeline):
         if offset_mapping:
             kwargs["offset_mapping"] = offset_mapping
 
-        return super().__call__(inputs, **kwargs)
+        # CG. Add knowledge as paramter
+        return super().__call__(inputs, knowledge=knowledge, **kwargs)
 
-    def preprocess(self, sentence, offset_mapping=None):
+    def preprocess(self, sentence, knowledge: Optional[torch.LongTensor] = None, offset_mapping=None):
         truncation = True if self.tokenizer.model_max_length and self.tokenizer.model_max_length > 0 else False
         model_inputs = self.tokenizer(
             sentence,
@@ -203,6 +210,7 @@ class TokenClassificationPipeline(Pipeline):
             model_inputs["offset_mapping"] = offset_mapping
 
         model_inputs["sentence"] = sentence
+        model_inputs["knowledge"] = knowledge
 
         return model_inputs
 

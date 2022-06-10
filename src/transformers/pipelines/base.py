@@ -974,7 +974,8 @@ class Pipeline(_ScikitCompat):
         final_iterator = PipelineIterator(model_iterator, self.postprocess, postprocess_params)
         return final_iterator
 
-    def __call__(self, inputs, *args, num_workers=None, batch_size=None, **kwargs):
+    # CG. Add knowledge as parameter
+    def __call__(self, inputs, knowledge: Optional[torch.LongTensor] = None, *args, num_workers=None, batch_size=None, **kwargs):
         if args:
             logger.warning(f"Ignoring args : {args}")
 
@@ -1029,13 +1030,16 @@ class Pipeline(_ScikitCompat):
         elif is_iterable:
             return self.iterate(inputs, preprocess_params, forward_params, postprocess_params)
         else:
-            return self.run_single(inputs, preprocess_params, forward_params, postprocess_params)
+            # CG. Knowledge
+            return self.run_single(inputs, preprocess_params, forward_params, postprocess_params, knowledge=knowledge)
 
     def run_multi(self, inputs, preprocess_params, forward_params, postprocess_params):
         return [self.run_single(item, preprocess_params, forward_params, postprocess_params) for item in inputs]
 
-    def run_single(self, inputs, preprocess_params, forward_params, postprocess_params):
-        model_inputs = self.preprocess(inputs, **preprocess_params)
+    # CG. Knowledge
+    def run_single(self, inputs,  preprocess_params, forward_params, postprocess_params,
+                   knowledge: Optional[torch.LongTensor] = None,):
+        model_inputs = self.preprocess(inputs, **preprocess_params, knowledge=knowledge)
         model_outputs = self.forward(model_inputs, **forward_params)
         outputs = self.postprocess(model_outputs, **postprocess_params)
         return outputs

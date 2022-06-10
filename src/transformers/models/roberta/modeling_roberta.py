@@ -503,9 +503,6 @@ class RobertaLayer(nn.Module):
         #     self.feed_forward_chunk, self.chunk_size_feed_forward, self.seq_len_dim, attention_output
         # )
 
-        if knowledge is not None:
-            fnn_input = {'attention_output': attention_output, 'knowledge': knowledge}
-
         layer_output = apply_chunking_to_forward(
             self.feed_forward_chunk_know, self.chunk_size_feed_forward, self.seq_len_dim, attention_output, knowledge
         )

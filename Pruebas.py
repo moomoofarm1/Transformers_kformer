@@ -5,6 +5,7 @@ import torch
 from os.path import isfile, join
 from os import listdir
 from seqeval.metrics import f1_score, precision_score, recall_score
+import pysbd
 
 from datasets import Dataset, DatasetDict
 from transformers import (
@@ -62,14 +63,23 @@ def get_all_labels(path_dir):
     return final_labels
 
 
-def get_model(checkpoint, num_labels, label_map, label2id_, from_tf=False):
-    config = AutoConfig.from_pretrained(
-        checkpoint,
-        num_labels=num_labels,
-        id2label=label_map,
-        label2id=label2id_,
-        knowledge=[9, 11]
-    )
+def get_model(checkpoint, num_labels, label_map, label2id_, knowledge=None, from_tf=False):
+    if knowledge is not None:
+        config = AutoConfig.from_pretrained(
+            checkpoint,
+            num_labels=num_labels,
+            id2label=label_map,
+            label2id=label2id_,
+            knowledge=knowledge
+        )
+    else:
+        config = AutoConfig.from_pretrained(
+            checkpoint,
+            num_labels=num_labels,
+            id2label=label_map,
+            label2id=label2id_,
+            knowledge=[-1, -1]
+        )
 
     # model = AutoModelForTokenClassification.from_pretrained(
     #     checkpoint,
@@ -97,8 +107,8 @@ def get_model(checkpoint, num_labels, label_map, label2id_, from_tf=False):
     return config, model, tokenizer
 
 
-def get_dataset(path, dir_paths, data_type, label2id_):
-    columns = ["tokens", "labels", "knowledge"]
+def get_dataset(path, dir_paths, data_type, label2id_, add_know=False):
+    columns = ["tokens", "labels", "knowledge"] if add_know else ["tokens", "labels"]
     datasets_dict = dict()
     dfs = dict()
 
@@ -110,7 +120,6 @@ def get_dataset(path, dir_paths, data_type, label2id_):
             df_readed = pd.read_csv(path + directory + csv_file)
             for i in range(len(columns)):
                 df_readed[columns[i]] = df_readed[columns[i]].apply(ast.literal_eval)
-                # df_readed[columns[1]] = df_readed[columns[1]].apply(ast.literal_eval)
             df_col = pd.concat([df_col, df_readed])
 
         df_col = df_col.reset_index(drop=True)
@@ -158,9 +167,6 @@ def tokenize_and_align_labels(examples):
             tokenized_row['attention_mask'].append(tokenized_know['attention_mask'])
         tokenized_knowledge.append(tokenized_row)
 
-    # tokenized_knowledge = _tokenizer(examples["knowledge"],
-    #                                  truncation=True,)
-
     labels = []
     for i, label in enumerate(examples[f"labels"]):
         word_ids = tokenized_inputs.word_ids(batch_index=i)  # Map tokens to their respective word.
@@ -178,7 +184,19 @@ def tokenize_and_align_labels(examples):
             # For the other tokens in a word, we set the label to either the current label or -100, depending on
             # the label_all_tokens flag.
             else:
-                label_ids.append(label[word_idx] if label_all_tokens else -100)
+                # label_ids.append(label[word_idx] if label_all_tokens else -100)
+                if label_all_tokens:
+                    if label[word_idx] == 0:
+                        label_ids.append(label[word_idx])
+                    else:
+                        # If label is odd it means is a B- (begin) label so add one to take I- (intern) label
+                        # If label is even it means is a I- (intern) label
+                        if label[word_idx] % 2 - 1 == 0:
+                            label_ids.append(label[word_idx] + 1)
+                        else:
+                            label_ids.append(label[word_idx])
+                else:
+                    label_ids.append(-100)
             previous_word_idx = word_idx
         labels.append(label_ids)
 
@@ -234,7 +252,191 @@ def get_trainer(path, model, tokenizer, tokenized_datasets, data_collator):
     return training_args, trainer
 
 
+def tokenize_test(entrada, tokenizer):
+    tokenized_knowledge = []
+    tokenized_row = {'input_ids': [], 'attention_mask': []}
+    for know in entrada['knowledge']:
+        tokenized_know = (tokenizer(know, truncation=True))
+        tokenized_row['input_ids'].append(tokenized_know['input_ids'])
+        tokenized_row['attention_mask'].append(tokenized_know['attention_mask'])
+    tokenized_knowledge.append(tokenized_row)
+
+    encoding = tokenizer(entrada['tokens'], return_tensors="pt", is_split_into_words=True, truncation=True)
+
+    l = []
+    for e in tokenized_knowledge:
+        l.append(e['input_ids'])
+    # encoding["knowledge"] = torch.tensor(l)
+
+    return encoding
+
+
+def pred(model, encoding):
+    # entrada = {'tokens': ['El', '1', 'de', 'enero', 'de', '2020,', 'ingresó', 'en', 'el', 'Union', 'Hospital', '(facultad', 'de',
+    #                       'medicina', 'Tongji,', 'Wuhan,', 'provincia', 'de', 'Hubei)', 'un', 'hombre', 'de', '42', 'años', 'con',
+    #                       'hipertermia', '(39,6', '°C),', 'tos', 'y', 'que', 'refería', 'fatiga', 'de', 'una', 'semana', 'de',
+    #                       'evolución', '.'],
+    #            'knowledge': ['This is a test 0', 'This is a test 1', 'This is a test 2', 'This is a test 3', 'This is a test 4',
+    #                          'This is a test 5', 'This is a test 6', 'This is a test 7', 'This is a test 8', 'This is a test 9',
+    #                          'This is a test 10', 'This is a test 11', 'This is a test 12', 'This is a test 13',
+    #                          'This is a test 14', 'This is a test 15', 'This is a test 16', 'This is a test 17',
+    #                          'This is a test 18', 'This is a test 19']}
+
+    outputs = model(**encoding)
+    logits = outputs.logits
+    # print(logits.shape)
+    predicted_label_classes = logits.argmax(-1)
+    # print(predicted_label_classes)
+    predicted_labels = [model.config.id2label[id] for id in predicted_label_classes.squeeze().tolist()]
+    print(predicted_labels, end="\n"*2)
+
+    return predicted_labels
+
+
+def model_test():
+    from transformers import pipeline
+
+    path = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER/"
+    path_data = path + "data/"
+    path_test = path_data + "training_valid_test_background_multilingual/test_background/pruebas/"
+    path_tsv = path_test + "prueba_test.tsv"
+
+    # Estas labels están al revés
+    labels = ['O', 'B-SPECIES', 'I-SPECIES', 'B-HUMAN', 'I-HUMAN', '[CLS]', '[SEP]']
+    label_map = {i: label for i, label in enumerate(labels)}
+    label2id_ = {label: i for i, label in enumerate(labels)}
+    num_labels = len(labels)
+
+    files = [f for f in listdir(path_test) if isfile(join(path_test, f))]
+
+    checkpoint = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER/models/checkpoint-9500"
+    # checkpoint = "PlanTL-GOB-ES/roberta-base-bne"
+
+    _, model, tokenizer = get_model(checkpoint, num_labels, label_map, label2id_)
+    nlp = pipeline("ner", model=model, tokenizer=tokenizer)
+
+    df = pd.DataFrame(columns=["filename", "mark", "label", "off0", "off1", "span"])
+
+    for file in files:
+        predictions = []
+
+        with open(path_test + file, 'r', encoding="utf-8-sig") as f:
+            text = f.read()
+
+        seg = pysbd.Segmenter(language="es", clean=False)
+        sentences = seg.segment(text)
+
+        for sentence in sentences:
+            # Aquí se pillaría el knowledge de donde sea, ahora se hace una prueba solo
+            knowledge = []
+            for i in range(20):
+                knowledge.append(f"This is a test {i}")
+
+            tokenized_knowledge = []
+            for know in knowledge:
+                tokenized_know = (tokenizer(know, truncation=True))
+                tokenized_knowledge.append(tokenized_know['input_ids'])
+            tokenized_knowledge = torch.LongTensor([tokenized_knowledge])
+            # ********************************************************************
+            prediction = nlp(sentence, ignore_labels=[], grouped_entities=True)
+            # prediction = nlp(sentence, knowledge=tokenized_knowledge, ignore_labels=[], grouped_entities=True)
+            predictions.append({'prediction': prediction, 'sentence': sentence})
+
+        df = pd.concat([df, add_predictions_to_df(df, file, text, predictions)], ignore_index=True)
+
+    return None
+
+
+def add_predictions_to_df(df, file, text, predictions):
+    """
+    [{'end': 5,
+      'entity_group': 'SPECIES',
+      'score': 0.9974855,
+      'start': 0,
+      'word': ' Mujer'},
+     {'end': 35,
+      'entity_group': 'O',
+      'score': 0.9997915,
+      'start': 6,
+      'word': ' de 59 años cuyos antecedentes'},
+     {'end': 46,
+      'entity_group': 'SPECIES',
+      'score': 0.99742824,
+      'start': 36,
+      'word': ' personales'},
+     """
+    pred_dict = {"filename": [], "mark": [], "label": [], "off0": [], "off1": [], "span": []}
+
+    #
+    # PROBLEMA
+    # PROBLEMA
+    #
+    # SARS-COV-2 O LO QUE SEA LO ESTÁ SEPARANDO PORQUE ENTIENDE QUE TODO ESO ES B-SPECIE
+    # ESO HABRÍA QUE CAMBIARLO EN LO DE EXPANDIR
+    #
+    # DONE - OTRA COSA: EN EL PROCESADO DE DATOS HACER QUE SEA UTF-8-SIG PARA ELIMINAR LA MOVIDA DE PRINCIPIO DE FRASE
+    #
+
+    mark = 1
+    for element in predictions:
+        prediction = element['prediction']
+        for entity in prediction:
+            if entity['entity_group'] != 'O':
+                sentence = element['sentence']
+                pred_dict['filename'].append(file)
+                pred_dict['mark'].append(f"T{mark}")
+                pred_dict['label'].append(entity['entity_group'])
+                pred_dict['span'].append(entity['word'])
+
+                init_s = text.find(sentence)
+                pred_dict['off0'].append(init_s + entity['start'])
+                pred_dict['off1'].append(init_s + entity['end'])
+
+                mark += 1
+
+    return pd.DataFrame.from_dict(pred_dict)
+
+
+def prueba_pipeline():
+    from transformers import pipeline
+
+    labels = ['O', 'B-HUMAN', 'I-HUMAN', 'B-SPECIES', 'I-SPECIES', '[CLS]', '[SEP]']
+    label_map = {i: label for i, label in enumerate(labels)}
+    label2id_ = {label: i for i, label in enumerate(labels)}
+    num_labels = len(labels)
+
+    # checkpoint = "PlanTL-GOB-ES/roberta-base-bne"
+    checkpoint = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER/models/checkpoint-9500"
+
+    _, model, tokenizer = get_model(checkpoint, num_labels, label_map, label2id_)
+
+    nlp = pipeline("ner", model=model, tokenizer=tokenizer)
+
+    text = "Mujer de 59 años cuyos antecedentes personales incluyen hipertensión arterial, artropatía degenerativa cervical, lumbociática crónica, tuberculosis ganglionar diagnosticada por cuadro de eritema nudoso y migraña."
+    knowledge = []
+    for i in range(20):
+        knowledge.append(f"This is a test {i}")
+
+    tokenized_knowledge = []
+    for know in knowledge:
+        tokenized_know = (tokenizer(know, truncation=True))
+        tokenized_knowledge.append(tokenized_know['input_ids'])
+    tokenized_knowledge = torch.LongTensor([tokenized_knowledge])
+
+    # res = nlp(text, grouped_entities=True)
+    res = nlp(text, knowledge=tokenized_knowledge, ignore_labels=[], grouped_entities=True)
+
+    for i in res:
+        print(i)
+
+    return res
+
+
 if __name__ == "__main__":
+    # model_test()
+    #
+    # exit(0)
+
     _path = "C:/Users/carlo/Documents/Máster/Trabajo-Fin-De-Master/LivingNER/"
     _path_code = _path + "Code/"
     _path_data = _path + "data/"
@@ -244,20 +446,21 @@ if __name__ == "__main__":
     num_threads = 16
 
     _labels = get_all_labels(_path_data + "train-set/subtask1-NER/")
+    print(_labels)
     _label_map = {i: label for i, label in enumerate(_labels)}
     _label2id_ = {label: i for i, label in enumerate(_labels)}
     _num_labels = len(_labels)
 
     _train_path = "train-set-pruebas/processed/"
     _dev_path = "dev-set-pruebas/processed/"
-    _test_path = "test-set/processed/"
+    _test_path = "test-set-pruebas/processed/"
 
     _dir_paths = [_train_path, _dev_path]
     _data_type_ = ["train", "dev"]
 
     print("Cargando datos...")
 
-    _raw_datasets = get_dataset(_path_data, _dir_paths, _data_type_, _label2id_)
+    _raw_datasets = get_dataset(_path_data, _dir_paths, _data_type_, _label2id_, add_know=True)
 
     print("DONE\n")
 
